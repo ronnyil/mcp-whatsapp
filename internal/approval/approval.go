@@ -154,7 +154,7 @@ var page = template.Must(template.New("p").Parse(`<!doctype html><html><head>
 pre{white-space:pre-wrap;word-break:break-word;border:1px solid #ccc;border-radius:8px;padding:12px;font:16px system-ui,sans-serif}
 button{font-size:18px;padding:14px;width:100%;margin-top:12px;border-radius:8px;border:1px solid #888}
 .ok{background:#1a7f37;color:#fff;border:0}</style></head><body>
-{{if .List}}<h2>Pending approvals: {{.Account}}</h2>{{range .List}}<p><a href="/a/{{.ID}}">{{.Name}}</a>, expires {{.Expires.Format "15:04"}}</p>{{else}}<p>Nothing pending.</p>{{end}}
+{{if .IsList}}<h2>Pending approvals: {{.Account}}</h2>{{range .List}}<p><a href="/a/{{.ID}}">{{.Name}}</a>, expires {{.Expires.Format "15:04"}}</p>{{else}}<p>Nothing pending.</p>{{end}}
 {{else}}{{with .Req}}
 <h2>Send WhatsApp message?</h2>
 <div class="k">From account</div><div class="v">{{$.Account}}</div>
@@ -190,10 +190,7 @@ func (m *Manager) list(w http.ResponseWriter, r *http.Request) {
 			list = append(list, x)
 		}
 	}
-	if list == nil {
-		list = []row{} // non-nil so the template takes the list branch
-	}
-	m.render(w, map[string]any{"Account": m.pol.AccountLabel, "List": list})
+	m.render(w, map[string]any{"Account": m.pol.AccountLabel, "IsList": true, "List": list})
 }
 
 func (m *Manager) show(w http.ResponseWriter, r *http.Request) {
