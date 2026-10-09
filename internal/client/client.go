@@ -15,6 +15,7 @@ import (
 	"go.mau.fi/whatsmeow"
 	wmstore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types"
 	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 
@@ -261,6 +262,15 @@ func (c *Client) AddLoggedOutHandler(fn func(*events.LoggedOut)) {
 			fn(lo)
 		}
 	})
+}
+
+// OwnJID returns the paired account's own phone-number JID without device
+// suffix, or an empty JID when unpaired.
+func (c *Client) OwnJID() types.JID {
+	if c.wa.Store.ID == nil {
+		return types.JID{}
+	}
+	return c.wa.Store.ID.ToNonAD()
 }
 
 // WA exposes the underlying whatsmeow client for advanced callers.

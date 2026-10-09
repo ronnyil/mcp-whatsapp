@@ -17,6 +17,7 @@ import (
 	"github.com/sealjay/mcp-whatsapp/internal/accessjwt/jwttest"
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 	"github.com/sealjay/mcp-whatsapp/internal/policy"
+	"go.mau.fi/whatsmeow/types"
 )
 
 const (
@@ -26,6 +27,8 @@ const (
 	spouse     = "972501111111"
 	spouseJID  = "972501111111@s.whatsapp.net"
 	publicURL  = "https://approve-personal.example.com"
+	ownNum     = "972543968469"
+	ownJID     = ownNum + "@s.whatsapp.net"
 )
 
 type sent struct{ to, body string }
@@ -33,12 +36,14 @@ type sent struct{ to, body string }
 type fakeSender struct {
 	mu        sync.Mutex
 	calls     []sent
+	own       types.JID
 	connected bool
 	result    client.SendResult
 	onSend    func(ctx context.Context)
 }
 
 func (f *fakeSender) IsConnected() bool { return f.connected }
+func (f *fakeSender) OwnJID() types.JID { return f.own }
 func (f *fakeSender) Send(ctx context.Context, to, body string) client.SendResult {
 	if f.onSend != nil {
 		f.onSend(ctx)
@@ -60,9 +65,17 @@ type env struct {
 }
 
 func writePolicy(t *testing.T, dir string, recipients string) *policy.Policy {
+	return writePolicyOpts(t, dir, recipients, false)
+}
+
+func writePolicyOpts(t *testing.T, dir string, recipients string, selfSend bool) *policy.Policy {
 	t.Helper()
 	p := filepath.Join(dir, "policy.json")
-	body := `{"account_label":"Personal","tools":["send_message"],
+	flag := "false"
+	if selfSend {
+		flag = "true"
+	}
+	body := `{"account_label":"Personal","tools":["send_message"],"auto_send_to_self":` + flag + `,
 	  "recipients":[` + recipients + `],
 	  "approval":{"listen":"127.0.0.1:9765","public_url":"` + publicURL + `","ttl_minutes":30},
 	  "access":{"team_domain":"x.cloudflareaccess.com","allowed_emails":["` + me + `"],"approve_aud":"` + approveAUD + `","mcp_aud":"` + mcpAUD + `"}}`
@@ -81,7 +94,8 @@ const spouseEntry = `{"name":"Spouse","id":"` + spouse + `"}`
 func newEnv(t *testing.T) *env {
 	t.Helper()
 	e := &env{t: t, dir: t.TempDir(), team: jwttest.New(t),
-		sender: &fakeSender{connected: true, result: client.SendResult{Success: true, ID: "MSGID"}}}
+		sender: &fakeSender{connected: true, own: types.NewJID(ownNum, types.DefaultUserServer),
+			result: client.SendResult{Success: true, ID: "MSGID"}}}
 	e.open(writePolicy(t, e.dir, spouseEntry))
 	return e
 }
@@ -491,5 +505,95 @@ func TestPendingCap(t *testing.T) {
 	}
 	if _, err := e.m.Request(context.Background(), spouse, "one too many"); err == nil {
 		t.Fatal("pending cap not enforced")
+	}
+}
+
+func TestSelfSendIsImmediateWhenEnabled(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyOpts(t, e.dir, "", true))
+	for i, to := range []string{ownNum, "+" + ownNum, ownJID, ownNum + ":35@s.whatsapp.net"} {
+		msg, err := e.m.Request(context.Background(), to, "note")
+		if err != nil || !strings.HasPrefix(msg, "SENT to yourself") {
+			t.Fatalf("%s: msg=%q err=%v", to, msg, err)
+		}
+		if e.sender.count() != i+1 || e.sender.calls[i] != (sent{ownJID, "note"}) {
+			t.Fatalf("%s: sends %+v", to, e.sender.calls)
+		}
+	}
+	var pending, recorded int
+	_ = e.m.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE status='pending'`).Scan(&pending)
+	_ = e.m.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE decided_by='auto:self' AND status='sent'`).Scan(&recorded)
+	if pending != 0 || recorded != 4 {
+		t.Fatalf("pending=%d recorded=%d", pending, recorded)
+	}
+}
+
+func TestSelfSendOffByDefault(t *testing.T) {
+	e := newEnv(t) // auto_send_to_self false, allowlist = spouse only
+	if _, err := e.m.Request(context.Background(), ownNum, "note"); err == nil {
+		t.Fatal("self send allowed without the flag or an allowlist entry")
+	}
+	if e.sender.count() != 0 {
+		t.Fatal("sent")
+	}
+}
+
+func TestSelfFlagDoesNotOpenOtherRecipients(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyOpts(t, e.dir, "", true))
+	if _, err := e.m.Request(context.Background(), spouse, "hi"); err == nil {
+		t.Fatal("non-allowlisted recipient accepted with self flag on")
+	}
+	e.open(writePolicyOpts(t, e.dir, spouseEntry, true))
+	msg, err := e.m.Request(context.Background(), spouse, "hi")
+	if err != nil || !strings.HasPrefix(msg, "NOT SENT YET") || e.sender.count() != 0 {
+		t.Fatalf("allowlisted other recipient must still need approval: %q %v sends=%d", msg, err, e.sender.count())
+	}
+}
+
+func TestSelfSendHourlyCap(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyOpts(t, e.dir, "", true))
+	for i := 0; i < maxSelfPerHour; i++ {
+		if _, err := e.m.Request(context.Background(), ownNum, "x"); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if _, err := e.m.Request(context.Background(), ownNum, "one too many"); err == nil {
+		t.Fatal("cap not enforced")
+	}
+	later := time.Now().Add(61 * time.Minute)
+	e.m.SetClock(func() time.Time { return later })
+	if _, err := e.m.Request(context.Background(), ownNum, "next hour"); err != nil {
+		t.Fatalf("cap did not reset: %v", err)
+	}
+}
+
+func TestSelfSendUnpairedOrDisconnected(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyOpts(t, e.dir, "", true))
+	e.sender.own = types.JID{} // unpaired: no own identity, so no self match
+	if _, err := e.m.Request(context.Background(), ownNum, "x"); err == nil {
+		t.Fatal("unpaired self send allowed")
+	}
+	e.sender.own = types.NewJID(ownNum, types.DefaultUserServer)
+	e.sender.connected = false
+	if _, err := e.m.Request(context.Background(), ownNum, "x"); err == nil {
+		t.Fatal("disconnected self send reported success")
+	}
+	if e.sender.count() != 0 {
+		t.Fatal("sent while unpaired/disconnected")
+	}
+}
+
+func TestSelfSendAmbiguousFailureNotRetried(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyOpts(t, e.dir, "", true))
+	e.sender.result = client.SendResult{Message: "Error sending message: websocket closed"}
+	if _, err := e.m.Request(context.Background(), ownNum, "x"); err == nil || !strings.Contains(err.Error(), "may or may not") {
+		t.Fatalf("err=%v", err)
+	}
+	if e.sender.count() != 1 {
+		t.Fatalf("attempts=%d", e.sender.count())
 	}
 }

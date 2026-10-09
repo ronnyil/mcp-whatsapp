@@ -13,6 +13,7 @@
     "get_status",
     "send_message"
   ],
+  "auto_send_to_self": false,
   "recipients": [
     { "name": "Me (notes to self)", "id": "9725XXXXXXXX" },
     { "name": "Spouse", "id": "9725YYYYYYYY" },

@@ -34,11 +34,14 @@ import (
 	"time"
 
 	_ "github.com/mattn/go-sqlite3"
+	"go.mau.fi/whatsmeow/types"
 
 	"github.com/sealjay/mcp-whatsapp/internal/accessjwt"
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 	"github.com/sealjay/mcp-whatsapp/internal/policy"
 )
+
+const autoSelf = "auto:self"
 
 const (
 	maxOpen        = 20                 // cap on simultaneously pending requests
@@ -63,7 +66,11 @@ const (
 type Sender interface {
 	IsConnected() bool
 	Send(ctx context.Context, recipient, message string) client.SendResult
+	OwnJID() types.JID
 }
+
+// maxSelfPerHour caps automatic "Message yourself" sends.
+const maxSelfPerHour = 20
 
 // Checker authenticates a browser request (an *accessjwt.Verifier).
 type Checker interface {
@@ -147,6 +154,12 @@ func (m *Manager) Request(ctx context.Context, rawRecipient, body string) (strin
 	}
 	if len([]rune(body)) > maxBody {
 		return "", fmt.Errorf("message longer than %d characters", maxBody)
+	}
+	if m.pol.AutoSendToSelf {
+		own := m.send.OwnJID()
+		if target, err := policy.Canonical(ctx, m.lids, rawRecipient); err == nil && !own.IsEmpty() && target == own {
+			return m.sendToSelf(own, body)
+		}
 	}
 	jid, name, err := m.pol.Authorize(ctx, m.lids, rawRecipient)
 	if err != nil {
@@ -381,14 +394,55 @@ func (m *Manager) attempt(id string) {
 		m.setStatus(id, StatusFailed, "WhatsApp not connected; nothing sent")
 		return
 	}
-	sr := m.send.Send(ctx, req.JID, req.Body)
+	m.record(id, m.send.Send(ctx, req.JID, req.Body))
+}
+
+// record stores the outcome of one send attempt and returns the status.
+func (m *Manager) record(id string, sr client.SendResult) string {
 	switch {
 	case sr.Success:
 		m.setStatus(id, StatusSent, sr.ID)
+		return StatusSent
 	case strings.HasPrefix(sr.Message, "rate limited"), strings.HasPrefix(sr.Message, "Not connected"):
 		// Refused before anything went on the wire.
 		m.setStatus(id, StatusFailed, sr.Message+"; nothing sent")
+		return StatusFailed
 	default:
 		m.setStatus(id, StatusUnknown, "send error, may or may not have been delivered; check WhatsApp; not retried: "+sr.Message)
+		return StatusUnknown
+	}
+}
+
+// sendToSelf delivers a note to the account's own chat without approval
+// (auto_send_to_self). It is capped per hour and recorded like any request.
+func (m *Manager) sendToSelf(own types.JID, body string) (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), m.SendTimeout)
+	defer cancel()
+	now := m.now()
+	var recent int
+	if err := m.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE decided_by=? AND created_at>?`,
+		autoSelf, now.Add(-time.Hour).Unix()).Scan(&recent); err != nil {
+		return "", err
+	}
+	if recent >= maxSelfPerHour {
+		return "", fmt.Errorf("not sent: more than %d messages to yourself in the last hour", maxSelfPerHour)
+	}
+	if !m.send.IsConnected() {
+		return "", fmt.Errorf("not sent: WhatsApp not connected")
+	}
+	id := randHex(16)
+	if _, err := m.db.ExecContext(ctx,
+		`INSERT INTO requests (id, token, recipient_jid, recipient_name, body, created_at, expires_at, status, decided_by, decided_at)
+		 VALUES (?, ?, ?, 'Me (Message yourself)', ?, ?, ?, ?, ?, ?)`,
+		id, randHex(16), own.String(), body, now.Unix(), now.Unix(), StatusSending, autoSelf, now.Unix()); err != nil {
+		return "", err
+	}
+	switch m.record(id, m.send.Send(ctx, own.String(), body)) {
+	case StatusSent:
+		return "SENT to yourself (Message yourself chat).", nil
+	case StatusFailed:
+		return "", fmt.Errorf("not sent to yourself; nothing went out")
+	default:
+		return "", fmt.Errorf("send to yourself may or may not have gone through; check WhatsApp (not retried)")
 	}
 }

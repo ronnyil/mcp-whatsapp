@@ -75,8 +75,12 @@ type Policy struct {
 	AccountLabel string      `json:"account_label"`
 	Tools        []string    `json:"tools"`
 	Recipients   []Recipient `json:"recipients"`
-	Approval     Approval    `json:"approval"`
-	Access       Access      `json:"access"`
+	// AutoSendToSelf lets send_message deliver to the account's own number
+	// ("Message yourself") immediately, without approval. Every other
+	// recipient still needs the allowlist and an approval.
+	AutoSendToSelf bool     `json:"auto_send_to_self"`
+	Approval       Approval `json:"approval"`
+	Access         Access   `json:"access"`
 
 	tools map[string]bool
 }
