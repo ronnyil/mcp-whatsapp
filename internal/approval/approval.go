@@ -41,7 +41,10 @@ import (
 	"github.com/sealjay/mcp-whatsapp/internal/policy"
 )
 
-const autoSelf = "auto:self"
+const (
+	autoSelf = "auto:self"
+	autoList = "auto:list" // auto_send_recipients
+)
 
 const (
 	maxOpen        = 20                 // cap on simultaneously pending requests
@@ -159,6 +162,13 @@ func (m *Manager) Request(ctx context.Context, rawRecipient, body string) (strin
 		own := m.send.OwnJID()
 		if target, err := policy.Canonical(ctx, m.lids, rawRecipient); err == nil && !own.IsEmpty() && target == own {
 			return m.sendToSelf(own, body)
+		}
+	}
+	if len(m.pol.AutoSendRecipients) > 0 {
+		if target, err := policy.Canonical(ctx, m.lids, rawRecipient); err == nil {
+			if name, ok := m.pol.AutoRecipient(target); ok {
+				return m.sendAuto(target, name, body)
+			}
 		}
 	}
 	jid, name, err := m.pol.Authorize(ctx, m.lids, rawRecipient)
@@ -436,16 +446,28 @@ func (m *Manager) SendToSelf(body string) (string, error) {
 // sendToSelf delivers a note to the account's own chat without approval
 // (auto_send_to_self). It is capped per hour and recorded like any request.
 func (m *Manager) sendToSelf(own types.JID, body string) (string, error) {
+	return m.deliverNow(own, "Me (Message yourself)", autoSelf, body, "yourself (Message yourself chat)")
+}
+
+// sendAuto delivers to one of the policy's auto_send_recipients without
+// approval, under its own hourly cap.
+func (m *Manager) sendAuto(target types.JID, name, body string) (string, error) {
+	return m.deliverNow(target, name, autoList, body, name)
+}
+
+// deliverNow sends immediately, at most once, and records the outcome. Each
+// kind (self / list) has its own hourly cap.
+func (m *Manager) deliverNow(target types.JID, name, kind, body, label string) (string, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), m.SendTimeout)
 	defer cancel()
 	now := m.now()
 	var recent int
 	if err := m.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM requests WHERE decided_by=? AND created_at>?`,
-		autoSelf, now.Add(-time.Hour).Unix()).Scan(&recent); err != nil {
+		kind, now.Add(-time.Hour).Unix()).Scan(&recent); err != nil {
 		return "", err
 	}
 	if recent >= maxSelfPerHour {
-		return "", fmt.Errorf("not sent: more than %d messages to yourself in the last hour", maxSelfPerHour)
+		return "", fmt.Errorf("not sent: more than %d automatic messages to %s in the last hour", maxSelfPerHour, label)
 	}
 	if !m.send.IsConnected() {
 		return "", fmt.Errorf("not sent: WhatsApp not connected")
@@ -453,16 +475,16 @@ func (m *Manager) sendToSelf(own types.JID, body string) (string, error) {
 	id := randHex(16)
 	if _, err := m.db.ExecContext(ctx,
 		`INSERT INTO requests (id, token, recipient_jid, recipient_name, body, created_at, expires_at, status, decided_by, decided_at)
-		 VALUES (?, ?, ?, 'Me (Message yourself)', ?, ?, ?, ?, ?, ?)`,
-		id, randHex(16), own.String(), body, now.Unix(), now.Unix(), StatusSending, autoSelf, now.Unix()); err != nil {
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		id, randHex(16), target.String(), name, body, now.Unix(), now.Unix(), StatusSending, kind, now.Unix()); err != nil {
 		return "", err
 	}
-	switch m.record(id, m.send.Send(ctx, own.String(), body)) {
+	switch m.record(id, m.send.Send(ctx, target.String(), body)) {
 	case StatusSent:
-		return "SENT to yourself (Message yourself chat).", nil
+		return "SENT to " + label + ".", nil
 	case StatusFailed:
-		return "", fmt.Errorf("not sent to yourself; nothing went out")
+		return "", fmt.Errorf("not sent to %s; nothing went out", label)
 	default:
-		return "", fmt.Errorf("send to yourself may or may not have gone through; check WhatsApp (not retried)")
+		return "", fmt.Errorf("send to %s may or may not have gone through; check WhatsApp (not retried)", label)
 	}
 }

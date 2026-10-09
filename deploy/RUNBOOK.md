@@ -142,3 +142,7 @@ and header `authorization: Bearer <token>`. The approvals app stays as is.
   Claude so it can read invitations and notices. It is read-only, takes no
   path, and deletes the decrypted copy right after reading it. PDFs, videos
   and voice notes are not supported.
+- Automatic group: `"auto_send_recipients": [{"name": "//TODO:", "id": "<group>@g.us"}]`
+  in the policy lets send_message deliver there immediately (no approval),
+  capped at 20 an hour. Phone numbers or group JIDs only. Everything else
+  still needs the allowlist and an approval.

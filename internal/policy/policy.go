@@ -79,9 +79,14 @@ type Policy struct {
 	// AutoSendToSelf lets send_message deliver to the account's own number
 	// ("Message yourself") immediately, without approval. Every other
 	// recipient still needs the allowlist and an approval.
-	AutoSendToSelf bool     `json:"auto_send_to_self"`
-	Approval       Approval `json:"approval"`
-	Access         Access   `json:"access"`
+	AutoSendToSelf bool `json:"auto_send_to_self"`
+	// AutoSendRecipients are fixed destinations (typically one shared
+	// family group) that send_message delivers to immediately, without the
+	// allowlist or an approval. Phone numbers or group JIDs only; edited
+	// only in this file on the server, never over MCP.
+	AutoSendRecipients []Recipient `json:"auto_send_recipients"`
+	Approval           Approval    `json:"approval"`
+	Access             Access      `json:"access"`
 
 	tools map[string]bool
 }
@@ -122,6 +127,18 @@ func Load(path string) (*Policy, error) {
 		if p.Access.ApproveAUD == p.Access.MCPAUD {
 			return nil, fmt.Errorf("policy: approve_aud must differ from mcp_aud (separate Access applications)")
 		}
+	}
+	for _, r := range p.AutoSendRecipients {
+		if r.Name == "" {
+			return nil, fmt.Errorf("policy: auto_send_recipients entry %q needs a name", r.ID)
+		}
+		// nil resolver: LIDs are rejected, so every entry is unambiguous.
+		if _, err := Canonical(context.Background(), nil, r.ID); err != nil {
+			return nil, fmt.Errorf("policy: auto_send_recipients entry %q: %v (use a phone number or group JID)", r.Name, err)
+		}
+	}
+	if len(p.AutoSendRecipients) > 0 && !p.tools["send_message"] {
+		return nil, fmt.Errorf("policy: auto_send_recipients requires send_message in tools")
 	}
 	if p.Approval.TTLMinutes <= 0 {
 		p.Approval.TTLMinutes = 30
@@ -172,6 +189,17 @@ func Canonical(ctx context.Context, lids LIDResolver, raw string) (types.JID, er
 	default:
 		return types.JID{}, fmt.Errorf("recipient: unsupported destination type %q", jid.Server)
 	}
+}
+
+// AutoRecipient reports whether target (already canonical) is one of the
+// auto_send_recipients, and returns its display name.
+func (p *Policy) AutoRecipient(target types.JID) (string, bool) {
+	for _, r := range p.AutoSendRecipients {
+		if j, err := Canonical(context.Background(), nil, r.ID); err == nil && j == target {
+			return r.Name, true
+		}
+	}
+	return "", false
 }
 
 // Authorize resolves raw and checks it against the allowlist. It returns

@@ -32,7 +32,7 @@ type sendMessageArgs struct {
 	MarkChatRead bool   `json:"mark_chat_read,omitempty"`
 }
 
-const approvalSendDesc = "Send a WhatsApp text message from this account. To the account's own number (the \"Message yourself\" chat) it may be sent immediately if the server allows it. To anyone else nothing is sent by this call: the recipient must be on the server-side allowlist, and the call returns a one-time approval link the user must open and approve; always show that link to the user. Returns plain text saying what happened, or an error if the recipient is not allowed."
+const approvalSendDesc = "Send a WhatsApp text message from this account. To the account's own number (the \"Message yourself\" chat) and to the few fixed destinations the server owner configured for automatic delivery, it is sent immediately (the result starts with \"SENT\"). To anyone else nothing is sent by this call: the recipient must be on the server-side allowlist, and the call returns a one-time approval link the user must open and approve; always show that link to the user. Returns plain text saying what happened, or an error if the recipient is not allowed."
 
 func (s *Server) registerSendMessage() {
 	desc := "Send a new WhatsApp text message to a person or group; recipients see it as a fresh message from the paired account and the row is also stored in the local cache. Reversible via delete_message (revoke) or edit_message (correct text); to quote a previous message use send_reply, for emoji acknowledgement use send_reaction. Returns a JSON object `{Success, Message, ID}` where `ID` is the WhatsApp message ID on success."

@@ -618,3 +618,98 @@ func TestExportedSendToSelf(t *testing.T) {
 		t.Fatal("unpaired SendToSelf worked")
 	}
 }
+
+const familyGroup = "120363000000000001@g.us"
+
+func writePolicyAuto(t *testing.T, dir, recipients, auto string) *policy.Policy {
+	t.Helper()
+	p := filepath.Join(dir, "policy.json")
+	body := `{"account_label":"Personal","tools":["send_message"],"auto_send_to_self":true,
+	  "auto_send_recipients":[` + auto + `],
+	  "recipients":[` + recipients + `],
+	  "approval":{"listen":"127.0.0.1:9765","public_url":"` + publicURL + `","ttl_minutes":30},
+	  "access":{"team_domain":"x.cloudflareaccess.com","allowed_emails":["` + me + `"],"approve_aud":"` + approveAUD + `","mcp_aud":"` + mcpAUD + `"}}`
+	if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pol, err := policy.Load(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return pol
+}
+
+func TestAutoRecipientSendsImmediately(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyAuto(t, e.dir, "", `{"name":"//TODO:","id":"`+familyGroup+`"}`))
+	msg, err := e.m.Request(context.Background(), familyGroup, "shared digest")
+	if err != nil || msg != "SENT to //TODO:." {
+		t.Fatalf("msg=%q err=%v", msg, err)
+	}
+	if e.sender.count() != 1 || e.sender.calls[0] != (sent{familyGroup, "shared digest"}) {
+		t.Fatalf("sends %+v", e.sender.calls)
+	}
+	var recorded int
+	_ = e.m.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE decided_by='auto:list' AND status='sent' AND recipient_name='//TODO:'`).Scan(&recorded)
+	if recorded != 1 {
+		t.Fatalf("recorded=%d", recorded)
+	}
+	// Self-send still works alongside it.
+	if msg, err := e.m.Request(context.Background(), ownNum, "mine"); err != nil || !strings.HasPrefix(msg, "SENT to yourself") {
+		t.Fatalf("self: %q %v", msg, err)
+	}
+}
+
+func TestAutoRecipientsDoNotOpenOthers(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyAuto(t, e.dir, spouseEntry, `{"name":"Family","id":"`+familyGroup+`"}`))
+	for _, other := range []string{"120363000000000002@g.us", "972509999999"} {
+		if _, err := e.m.Request(context.Background(), other, "x"); err == nil {
+			t.Fatalf("%s accepted", other)
+		}
+	}
+	msg, err := e.m.Request(context.Background(), spouse, "hi")
+	if err != nil || !strings.HasPrefix(msg, "NOT SENT YET") {
+		t.Fatalf("allowlisted spouse must still need approval: %q %v", msg, err)
+	}
+	if e.sender.count() != 0 {
+		t.Fatalf("sent %+v", e.sender.calls)
+	}
+}
+
+func TestAutoRecipientHourlyCapSeparateFromSelf(t *testing.T) {
+	e := newEnv(t)
+	e.open(writePolicyAuto(t, e.dir, "", `{"name":"Family","id":"`+familyGroup+`"}`))
+	for i := 0; i < maxSelfPerHour; i++ {
+		if _, err := e.m.Request(context.Background(), familyGroup, "x"); err != nil {
+			t.Fatalf("send %d: %v", i, err)
+		}
+	}
+	if _, err := e.m.Request(context.Background(), familyGroup, "too many"); err == nil {
+		t.Fatal("cap not enforced")
+	}
+	if _, err := e.m.Request(context.Background(), ownNum, "self unaffected"); err != nil {
+		t.Fatalf("self cap shared with list cap: %v", err)
+	}
+}
+
+func TestAutoRecipientsPolicyValidation(t *testing.T) {
+	dir := t.TempDir()
+	bad := map[string]string{
+		"lid":     `{"name":"X","id":"123456789@lid"}`,
+		"no name": `{"name":"","id":"` + familyGroup + `"}`,
+		"garbage": `{"name":"X","id":"not a number"}`,
+	}
+	for name, entry := range bad {
+		p := filepath.Join(dir, name+".json")
+		body := `{"account_label":"P","tools":["send_message"],"auto_send_recipients":[` + entry + `],
+		  "approval":{"listen":"127.0.0.1:1","public_url":"https://a"},
+		  "access":{"team_domain":"x.cloudflareaccess.com","allowed_emails":["a@b.c"],"approve_aud":"a","mcp_aud":"b"}}`
+		if err := os.WriteFile(p, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := policy.Load(p); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
