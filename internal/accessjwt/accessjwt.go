@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"net/http"
 	"strings"
@@ -253,9 +254,39 @@ func Middleware(v *Verifier, next http.Handler) http.Handler {
 			return
 		}
 		if _, err := v.Check(r); err != nil {
+			log.Printf("access: rejected %s %s: %v; %s", r.Method, r.URL.Path, err, Describe(r.Header.Get("Cf-Access-Jwt-Assertion")))
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// Describe summarises an unverified token's header and claims for logs:
+// alg, kid, iss, aud, email presence and expiry. Never the token or signature.
+func Describe(raw string) string {
+	if raw == "" {
+		return "no assertion header"
+	}
+	parts := strings.Split(raw, ".")
+	if len(parts) != 3 {
+		return "assertion is not a JWT"
+	}
+	var h header
+	var c struct {
+		Iss   string          `json:"iss"`
+		Aud   json.RawMessage `json:"aud"`
+		Email string          `json:"email"`
+		Sub   string          `json:"sub"`
+		Type  string          `json:"type"`
+		Exp   *float64        `json:"exp"`
+	}
+	_ = decodePart(parts[0], &h)
+	_ = decodePart(parts[1], &c)
+	exp := "none"
+	if c.Exp != nil {
+		exp = time.Unix(int64(*c.Exp), 0).UTC().Format(time.RFC3339)
+	}
+	return fmt.Sprintf("token alg=%s kid=%.12s iss=%q aud=%s type=%q email=%q sub_set=%t exp=%s",
+		h.Alg, h.Kid, c.Iss, string(c.Aud), c.Type, c.Email, c.Sub != "", exp)
 }

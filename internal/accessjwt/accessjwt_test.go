@@ -141,3 +141,16 @@ func TestJWKSUnavailableFailsClosed(t *testing.T) {
 		t.Fatal("accepted with keys unreachable")
 	}
 }
+
+func TestDescribeNeverLeaksSignature(t *testing.T) {
+	team := jwttest.New(t)
+	tok := team.Sign(t, team.Valid(aud, me))
+	d := accessjwt.Describe(tok)
+	sig := strings.Split(tok, ".")[2]
+	if strings.Contains(d, sig) || !strings.Contains(d, `email="me@example.com"`) || !strings.Contains(d, aud) {
+		t.Fatalf("bad description: %s", d)
+	}
+	if accessjwt.Describe("") != "no assertion header" {
+		t.Fatal("empty header not described")
+	}
+}

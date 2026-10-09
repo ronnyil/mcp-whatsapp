@@ -25,6 +25,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,6 +35,7 @@ import (
 
 	_ "github.com/mattn/go-sqlite3"
 
+	"github.com/sealjay/mcp-whatsapp/internal/accessjwt"
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 	"github.com/sealjay/mcp-whatsapp/internal/policy"
 )
@@ -231,6 +233,7 @@ func (m *Manager) Handler() http.Handler {
 		h.Set("Content-Security-Policy", "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'")
 		h.Set("Referrer-Policy", "no-referrer")
 		if _, err := m.access.Check(r); err != nil {
+			log.Printf("approvals: rejected %s %s: %v; %s", r.Method, r.URL.Path, err, accessjwt.Describe(r.Header.Get("Cf-Access-Jwt-Assertion")))
 			http.Error(w, "forbidden", http.StatusForbidden)
 			return
 		}
