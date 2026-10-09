@@ -28,23 +28,35 @@ func load(t *testing.T, body string) (*Policy, error) {
 	return Load(p)
 }
 
+const access = `"access":{"team_domain":"t.cloudflareaccess.com","allowed_emails":["a@b.c"],"mcp_aud":"m","approve_aud":"a"}`
+
 func TestLoadRejectsDangerousTools(t *testing.T) {
-	for _, tool := range []string{"send_file", "delete_message", "pairing_status", "download_media", "set_privacy_setting"} {
-		if _, err := load(t, `{"account_label":"x","tools":["`+tool+`"]}`); err == nil {
+	for _, tool := range []string{"send_file", "delete_message", "pairing_status", "download_media", "set_privacy_setting", "mark_chat_read", "send_reply"} {
+		if _, err := load(t, `{"account_label":"x","tools":["`+tool+`"],`+access+`}`); err == nil {
 			t.Errorf("tool %s was accepted", tool)
 		}
 	}
 }
 
 func TestLoadRejectsUnknownFields(t *testing.T) {
-	if _, err := load(t, `{"account_label":"x","tools":[],"recipient":[]}`); err == nil {
+	if _, err := load(t, `{"account_label":"x","tools":[],"recipient":[],`+access+`}`); err == nil {
 		t.Error("typo field accepted")
 	}
 }
 
 func TestSendRequiresApprovalConfig(t *testing.T) {
-	if _, err := load(t, `{"account_label":"x","tools":["send_message"]}`); err == nil {
-		t.Error("send_message accepted without approval/access config")
+	if _, err := load(t, `{"account_label":"x","tools":["send_message"],`+access+`}`); err == nil {
+		t.Error("send_message accepted without approval config")
+	}
+	sameAud := `"access":{"team_domain":"t","allowed_emails":["a@b.c"],"mcp_aud":"x","approve_aud":"x"}`
+	if _, err := load(t, `{"account_label":"x","tools":["send_message"],"approval":{"listen":"127.0.0.1:9","public_url":"https://a"},`+sameAud+`}`); err == nil {
+		t.Error("same AUD for MCP and approvals accepted")
+	}
+}
+
+func TestAccessIdentityRequired(t *testing.T) {
+	if _, err := load(t, `{"account_label":"x","tools":["list_chats"]}`); err == nil {
+		t.Error("policy without access settings accepted")
 	}
 }
 
@@ -55,7 +67,7 @@ func TestAuthorize(t *testing.T) {
 	  "recipients":[
 	    {"name":"Spouse","id":"972501111111"},
 	    {"name":"Family","id":"120363000000000001@g.us"}
-	  ]}`)
+	  ],`+access+`}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +103,7 @@ func TestAuthorize(t *testing.T) {
 }
 
 func TestEmptyAllowlistDeniesAll(t *testing.T) {
-	p, err := load(t, `{"account_label":"x","tools":[]}`)
+	p, err := load(t, `{"account_label":"x","tools":[],`+access+`}`)
 	if err != nil {
 		t.Fatal(err)
 	}

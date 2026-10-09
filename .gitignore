@@ -5,3 +5,8 @@ bin/
 cover.out
 # Anchored: only the repo-root session/data dir, NOT internal/store/
 /store/
+
+# Python
+__pycache__/
+*.pyc
+!deploy/tests/fixtures/*.db

@@ -43,10 +43,16 @@ type Config struct {
 	MCPMount  func(mux *http.ServeMux)
 	AuthToken string
 
-	// AdminAddr, when set, moves /pair, /pair/* and /healthz to a second
-	// listener on this (loopback) address. The main listener then serves
-	// /mcp only, so the public tunnel hostname cannot reach pairing or reset.
+	// AdminAddr, when set, enables restricted mode: the pairing web UI
+	// (/pair, /pair/qr.png, /pair/reset) is not served on any listener, the
+	// main listener serves /mcp only, and a second loopback listener on this
+	// address serves only GET /healthz. Pairing is done with the pair-code
+	// command while the service is stopped.
 	AdminAddr string
+	// NoAutoPair stops the daemon from opening a QR pairing session when the
+	// device is unpaired or gets logged out. It waits instead; get_status
+	// reports the state. Used with AdminAddr, where no one could scan a QR.
+	NoAutoPair bool
 	// MCPWrap, if non-nil, wraps the main listener's handler (used for the
 	// optional Cloudflare Access JWT check on /mcp).
 	MCPWrap func(http.Handler) http.Handler
@@ -63,6 +69,7 @@ type Server struct {
 	mu         sync.Mutex
 	httpServer *http.Server
 	boundAddr  string
+	adminAddr  string
 	listenerOK chan struct{} // closed once the listener is bound (tests use this)
 }
 
@@ -92,6 +99,13 @@ func (s *Server) Cache() *PairCache { return s.cache }
 // so setting it any time before Run takes effect.
 func (s *Server) SetMCPMount(fn func(mux *http.ServeMux)) { s.cfg.MCPMount = fn }
 
+// AdminBoundAddr returns the admin listener's address (tests).
+func (s *Server) AdminBoundAddr() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.adminAddr
+}
+
 // BoundAddr returns the address the HTTP listener actually bound to, useful
 // when Addr was "host:0". Only valid after <-s.listenerOK fires.
 func (s *Server) BoundAddr() string {
@@ -105,11 +119,10 @@ func (s *Server) BoundAddr() string {
 // sequence: drain HTTP → Disconnect driver.
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
-	handlers := newPairHandlers(s.cache, s.cfg.Driver)
+	adminErrCh := make(chan error, 1)
 	if s.cfg.AdminAddr != "" {
 		adminMux := http.NewServeMux()
-		handlers.mount(adminMux)
-		adminMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		adminMux.HandleFunc("GET /healthz", func(w http.ResponseWriter, r *http.Request) {
 			if s.cfg.Healthy != nil && s.cfg.Healthy() {
 				_, _ = w.Write([]byte("ok\n"))
 				return
@@ -120,11 +133,14 @@ func (s *Server) Run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("admin listen: %w", err)
 		}
+		s.mu.Lock()
+		s.adminAddr = adminLn.Addr().String()
+		s.mu.Unlock()
 		adminSrv := &http.Server{Handler: adminMux, ReadHeaderTimeout: 5 * time.Second}
-		go func() { _ = adminSrv.Serve(adminLn) }()
+		go func() { adminErrCh <- adminSrv.Serve(adminLn) }()
 		defer adminSrv.Close()
 	} else {
-		handlers.mount(mux)
+		newPairHandlers(s.cache, s.cfg.Driver).mount(mux)
 	}
 	if s.cfg.MCPMount != nil {
 		s.cfg.MCPMount(mux)
@@ -174,6 +190,12 @@ func (s *Server) Run(ctx context.Context) error {
 			s.cfg.Driver.Disconnect()
 			return fmt.Errorf("http listen: %w", err)
 		}
+	case err := <-adminErrCh:
+		// A dead admin listener means a dead health check; exit so the
+		// service manager restarts the whole process.
+		_ = httpSrv.Shutdown(context.Background())
+		s.cfg.Driver.Disconnect()
+		return fmt.Errorf("admin listener stopped: %w", err)
 	}
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -197,6 +219,9 @@ func (s *Server) bootDriver(ctx context.Context) error {
 		s.cache.SetPaired()
 		return s.cfg.Driver.Connect(ctx, s.onLoggedOut(ctx))
 	}
+	if s.cfg.NoAutoPair {
+		return nil // stay unpaired; pair-code links the device offline
+	}
 	return s.cfg.Driver.StartPairing(ctx, onQR, onPairSuccess)
 }
 
@@ -206,6 +231,9 @@ func (s *Server) bootDriver(ctx context.Context) error {
 func (s *Server) onLoggedOut(ctx context.Context) func() {
 	return func() {
 		s.cache.Reset()
+		if s.cfg.NoAutoPair {
+			return
+		}
 		onQR := func(code string) { s.cache.SetQR(code) }
 		onPairSuccess := func() {
 			s.cache.SetPaired()

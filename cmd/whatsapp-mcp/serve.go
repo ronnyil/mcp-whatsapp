@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -35,7 +36,7 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	fs.StringVar(&addr, "addr", "", "HTTP bind address (default: 127.0.0.1:8765, env WHATSAPP_MCP_ADDR)")
 	fs.BoolVar(&allowRemote, "allow-remote", false, "allow binding to a non-loopback address")
 	fs.StringVar(&policyPath, "policy", "", "policy JSON file (required): tool allowlist, send recipients, approval and Access settings")
-	fs.StringVar(&adminAddr, "admin-addr", "127.0.0.1:8865", "loopback address for /pair and /healthz (never expose this)")
+	fs.StringVar(&adminAddr, "admin-addr", "127.0.0.1:8865", "loopback address for GET /healthz (never expose this)")
 	if err := fs.Parse(args); err != nil {
 		return 2
 	}
@@ -52,6 +53,14 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		fmt.Fprintln(os.Stderr, "-admin-addr must be a loopback address")
 		return 2
 	}
+	// Decide /mcp authentication before opening anything: this fork honours
+	// WHATSAPP_MCP_TOKEN on loopback too, and refuses to run unauthenticated.
+	authToken := os.Getenv("WHATSAPP_MCP_TOKEN")
+	mcpWrap, err := mcpAuth(pol, authToken)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
 
 	addr = resolveAddr(addr)
 	if !allowRemote && !isLoopbackAddr(addr) {
@@ -62,9 +71,6 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	// When binding to a non-loopback address we require a shared bearer
 	// token. Loopback-only operation intentionally keeps no token so local
 	// editors and curl can hit the daemon without extra setup.
-	// This fork honours WHATSAPP_MCP_TOKEN on loopback too, so a bearer
-	// token can be enforced behind a tunnel.
-	authToken := os.Getenv("WHATSAPP_MCP_TOKEN")
 	if allowRemote {
 		if authToken == "" {
 			fmt.Fprintln(os.Stderr, "-allow-remote requires WHATSAPP_MCP_TOKEN to be set in the environment")
@@ -123,19 +129,14 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	// The daemon owns the pair cache, so build it first, then hand the cache
 	// to the MCP server (so pairing_status can surface the live QR), then
 	// mount the MCP HTTP handler back onto the daemon.
-	var mcpWrap func(http.Handler) http.Handler
-	if pol.Access.MCPAUD != "" {
-		v := accessjwt.New(ctx, pol.Access.TeamDomain, pol.Access.MCPAUD, pol.Access.AllowedEmails)
-		mcpWrap = func(h http.Handler) http.Handler { return accessjwt.Middleware(v, h) }
-	}
-
 	d, err := daemon.New(daemon.Config{
-		Addr:      addr,
-		Driver:    drv,
-		AuthToken: authToken,
-		AdminAddr: adminAddr,
-		MCPWrap:   mcpWrap,
-		Healthy:   c.IsConnected,
+		Addr:       addr,
+		Driver:     drv,
+		AuthToken:  authToken,
+		AdminAddr:  adminAddr,
+		NoAutoPair: true,
+		MCPWrap:    mcpWrap,
+		Healthy:    c.IsConnected,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon.New: %v\n", err)
@@ -143,25 +144,35 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	}
 
 	var approver mcpsrv.Approver
+	var approvalFailed atomic.Bool
 	if pol.ToolAllowed("send_message") {
-		v := accessjwt.New(ctx, pol.Access.TeamDomain, pol.Access.ApproveAUD, pol.Access.AllowedEmails)
-		mgr, err := approval.Open(storeDir, pol, c, v)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "approvals: %v\n", err)
-			return 1
-		}
 		if !isLoopbackAddr(pol.Approval.Listen) {
 			fmt.Fprintln(os.Stderr, "approval.listen must be a loopback address")
 			return 2
 		}
-		approvalSrv := &http.Server{Addr: pol.Approval.Listen, Handler: mgr.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		v := accessjwt.New(pol.Access.TeamDomain, pol.Access.ApproveAUD, pol.Access.AllowedEmails)
+		mgr, err := approval.Open(storeDir, pol, c, c.WA().Store.LIDs, v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "approvals: %v\n", err)
+			return 1
+		}
+		defer mgr.Close()
+		// Bind now so a busy port fails startup instead of failing later.
+		ln, err := net.Listen("tcp", pol.Approval.Listen)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "approval listener: %v\n", err)
+			return 1
+		}
+		approvalSrv := &http.Server{Handler: mgr.Handler(), ReadHeaderTimeout: 5 * time.Second}
 		go func() {
-			if err := approvalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
-				fmt.Fprintf(os.Stderr, "approval listener: %v\n", err)
-				cancel()
+			if err := approvalSrv.Serve(ln); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "approval listener stopped: %v\n", err)
+				approvalFailed.Store(true)
+				cancel() // exit non-zero so systemd restarts the service
 			}
 		}()
 		defer approvalSrv.Close()
+		go mgr.RunJanitor(ctx)
 		approver = mgr
 		fmt.Fprintf(os.Stderr, "approvals on http://%s (public %s)\n", pol.Approval.Listen, pol.Approval.PublicURL)
 	}
@@ -177,7 +188,25 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
 		return 1
 	}
+	if approvalFailed.Load() {
+		return 1
+	}
 	return 0
+}
+
+// mcpAuth decides how /mcp is authenticated. At least one of the Access
+// JWT (access.mcp_aud) or the bearer token (WHATSAPP_MCP_TOKEN, enforced by
+// the daemon) must be configured; with neither, serve refuses to start, so
+// no local process can call /mcp unauthenticated.
+func mcpAuth(pol *policy.Policy, token string) (func(http.Handler) http.Handler, error) {
+	if pol.Access.MCPAUD == "" && token == "" {
+		return nil, errors.New("refusing to start: /mcp would be unauthenticated; set access.mcp_aud (Cloudflare Access) or WHATSAPP_MCP_TOKEN")
+	}
+	if pol.Access.MCPAUD == "" {
+		return nil, nil
+	}
+	v := accessjwt.New(pol.Access.TeamDomain, pol.Access.MCPAUD, pol.Access.AllowedEmails)
+	return func(h http.Handler) http.Handler { return accessjwt.Middleware(v, h) }, nil
 }
 
 // resolveAddr applies the -addr / WHATSAPP_MCP_ADDR / default precedence.

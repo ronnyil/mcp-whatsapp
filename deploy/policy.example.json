@@ -26,7 +26,7 @@
   "access": {
     "team_domain": "yourteam.cloudflareaccess.com",
     "allowed_emails": ["you@example.com"],
-    "approve_aud": "PASTE-AUD-TAG-OF-THE-APPROVALS-ACCESS-APP",
-    "mcp_aud": ""
+    "mcp_aud": "PASTE-AUD-TAG-OF-THE-WHATSAPP-MCP-ACCESS-APP",
+    "approve_aud": "PASTE-AUD-TAG-OF-THE-WHATSAPP-APPROVALS-ACCESS-APP"
   }
 }

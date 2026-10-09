@@ -55,10 +55,12 @@ type Access struct {
 	TeamDomain    string   `json:"team_domain"`
 	AllowedEmails []string `json:"allowed_emails"`
 	ApproveAUD    string   `json:"approve_aud"`
-	// MCPAUD is optional. When set, /mcp also requires a valid Access JWT
-	// (defence in depth behind Managed OAuth). Leave empty until the proof
-	// of concept confirms Access forwards Cf-Access-Jwt-Assertion on MCP calls.
-	MCPAUD string `json:"mcp_aud,omitempty"`
+	// MCPAUD is the AUD tag of the Access application in front of /mcp.
+	// Every /mcp request must then carry a valid Access JWT for it, which
+	// also stops other local processes from calling 127.0.0.1 directly.
+	// It may be empty only when WHATSAPP_MCP_TOKEN is set instead (the
+	// request-header option); serve refuses to start with neither.
+	MCPAUD string `json:"mcp_aud"`
 }
 
 // Approval configures the approval web listener.
@@ -102,12 +104,18 @@ func Load(path string) (*Policy, error) {
 	if p.AccountLabel == "" {
 		return nil, fmt.Errorf("policy: account_label is required")
 	}
+	if p.Access.TeamDomain == "" || len(p.Access.AllowedEmails) == 0 {
+		return nil, fmt.Errorf("policy: access.team_domain and access.allowed_emails are required")
+	}
 	if p.tools["send_message"] {
 		if p.Approval.Listen == "" || p.Approval.PublicURL == "" {
 			return nil, fmt.Errorf("policy: send_message requires approval.listen and approval.public_url")
 		}
-		if p.Access.TeamDomain == "" || p.Access.ApproveAUD == "" || len(p.Access.AllowedEmails) == 0 {
-			return nil, fmt.Errorf("policy: send_message requires access.team_domain, access.approve_aud and access.allowed_emails")
+		if p.Access.ApproveAUD == "" {
+			return nil, fmt.Errorf("policy: send_message requires access.approve_aud")
+		}
+		if p.Access.ApproveAUD == p.Access.MCPAUD {
+			return nil, fmt.Errorf("policy: approve_aud must differ from mcp_aud (separate Access applications)")
 		}
 	}
 	if p.Approval.TTLMinutes <= 0 {
