@@ -34,7 +34,7 @@ done
 install -d -m700 /etc/cloudflared
 mv ~/.cloudflared/*.json /etc/cloudflared/
 cp /var/lib/wabuild/src/deploy/cloudflared-config.example.yml /etc/cloudflared/config.yml
-nano /etc/cloudflared/config.yml   # tunnel UUID (ls /etc/cloudflared), <domain>
+nano /etc/cloudflared/config.yml   # tunnel UUID (ls /etc/cloudflared), <domain>; keep the httpHostHeader lines
 cloudflared service install
 ```
 

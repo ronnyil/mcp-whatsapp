@@ -2,15 +2,22 @@
 # Routes the MCP listener (which serves only /mcp in this fork) and the
 # approval listener. The admin listener (/pair, /healthz on 88xx) is never
 # routed. Both hostnames must also be covered by Cloudflare Access apps.
+# httpHostHeader: the MCP library rejects a non-localhost Host header on a
+# loopback listener (DNS-rebinding protection), so the tunnel presents MCP
+# requests as "localhost". Access still authenticates every request.
 tunnel: TUNNEL-UUID
 credentials-file: /etc/cloudflared/TUNNEL-UUID.json
 ingress:
   - hostname: mcp-personal.example.com
     service: http://127.0.0.1:8765
+    originRequest:
+      httpHostHeader: localhost
   - hostname: approve-personal.example.com
     service: http://127.0.0.1:9765
   - hostname: mcp-second.example.com
     service: http://127.0.0.1:8766
+    originRequest:
+      httpHostHeader: localhost
   - hostname: approve-second.example.com
     service: http://127.0.0.1:9766
   - service: http_status:404
