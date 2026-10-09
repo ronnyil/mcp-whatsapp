@@ -11,6 +11,7 @@
     "get_poll_results",
     "request_sync",
     "get_status",
+    "view_image",
     "send_message"
   ],
   "auto_send_to_self": false,

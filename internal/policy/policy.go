@@ -36,6 +36,7 @@ var EnableableTools = map[string]bool{
 	"get_poll_results":    true,
 	"request_sync":        true,
 	"get_status":          true,
+	"view_image":          true,
 	"send_message":        true,
 }
 

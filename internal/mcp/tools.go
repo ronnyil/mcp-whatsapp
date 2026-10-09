@@ -23,4 +23,7 @@ func (s *Server) registerTools() {
 
 	// Phase 2 — polls + contact cards.
 	s.registerMediaTools()
+
+	// This fork: read-only image viewer (replaces download_media).
+	s.registerViewImage()
 }

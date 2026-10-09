@@ -138,3 +138,7 @@ and header `authorization: Bearer <token>`. The approvals app stays as is.
   on the VPS.
 - Approvals: links expire after `ttl_minutes`; message text is wiped 24 hours
   after a decision; rows are deleted after 7 days.
+- Images: `view_image` (add it to `"tools"` in the policy) returns a photo to
+  Claude so it can read invitations and notices. It is read-only, takes no
+  path, and deletes the decrypted copy right after reading it. PDFs, videos
+  and voice notes are not supported.
