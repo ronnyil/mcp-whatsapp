@@ -1,0 +1,22 @@
+# One instance per WhatsApp account: systemctl enable --now whatsapp-mcp@personal
+[Unit]
+Description=WhatsApp MCP (%i)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=wa-%i
+Group=wa-%i
+EnvironmentFile=/etc/whatsapp-mcp/%i.env
+ExecStart=/usr/local/bin/whatsapp-mcp -store /var/lib/wa-%i serve -addr ${MCP_ADDR} -admin-addr ${ADMIN_ADDR} -policy /etc/whatsapp-mcp/%i.json
+Restart=on-failure
+RestartSec=15
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/wa-%i
+
+[Install]
+WantedBy=multi-user.target

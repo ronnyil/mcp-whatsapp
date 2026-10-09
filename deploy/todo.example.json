@@ -1,0 +1,10 @@
+{
+  "me_names": ["Ron", "רון"],
+  "accounts": [
+    { "name": "personal", "messages_db": "/var/lib/wa-personal/messages.db", "chats": [] },
+    { "name": "second", "messages_db": "/var/lib/wa-second/messages.db", "chats": [] }
+  ],
+  "state": "/var/lib/wa-todo/state.json",
+  "mail_env": "/etc/whatsapp-mcp/mail.env",
+  "send_empty": true
+}

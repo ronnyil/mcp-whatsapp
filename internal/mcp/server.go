@@ -3,12 +3,20 @@
 package mcp
 
 import (
+	"context"
 	"net/http"
+	"sort"
 
 	"github.com/mark3labs/mcp-go/server"
 
 	"github.com/sealjay/mcp-whatsapp/internal/client"
+	"github.com/sealjay/mcp-whatsapp/internal/policy"
 )
+
+// Approver files a send for human approval. *approval.Manager satisfies it.
+type Approver interface {
+	Request(ctx context.Context, rawRecipient, body string) (string, error)
+}
 
 // pairingCache is the minimal pairing-state surface pairing_status needs.
 // *daemon.PairCache satisfies it. The smoke command and tests pass nil, in
@@ -21,9 +29,10 @@ type pairingCache interface {
 // Server holds the MCP server, its bound WhatsApp client, and an optional
 // pairing cache (used only by pairing_status).
 type Server struct {
-	client *client.Client
-	mcp    *server.MCPServer
-	cache  pairingCache
+	client   *client.Client
+	mcp      *server.MCPServer
+	cache    pairingCache
+	approver Approver // non-nil: send_message files approvals instead of sending
 }
 
 // NewServer constructs an MCP server with all tools registered against the
@@ -38,6 +47,33 @@ func NewServer(c *client.Client, cache pairingCache) *Server {
 	s := &Server{client: c, mcp: mcpSrv, cache: cache}
 	s.registerTools()
 	s.registerResources()
+	return s
+}
+
+// NewRestrictedServer is the constructor serve uses in this fork. It
+// registers Sealjay's tools, then deletes every tool the policy does not
+// allow, so they are neither listed nor callable. The media resource
+// template (an alternate route to download_media) is never registered.
+// send_message, if allowed, routes through approver and never sends.
+func NewRestrictedServer(c *client.Client, cache pairingCache, pol *policy.Policy, approver Approver) *Server {
+	mcpSrv := server.NewMCPServer(
+		"whatsapp",
+		"0.5.0-restricted",
+		server.WithToolCapabilities(true),
+	)
+	s := &Server{client: c, mcp: mcpSrv, cache: cache, approver: approver}
+	s.registerTools()
+	var drop []string
+	for name := range s.mcp.ListTools() {
+		if !pol.ToolAllowed(name) {
+			drop = append(drop, name)
+		}
+	}
+	sort.Strings(drop)
+	s.mcp.DeleteTools(drop...)
+	if pol.ToolAllowed("send_message") && approver == nil {
+		s.mcp.DeleteTools("send_message") // fail closed
+	}
 	return s
 }
 

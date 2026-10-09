@@ -268,3 +268,55 @@ func (c *Client) WA() *whatsmeow.Client { return c.wa }
 
 // Store returns the message cache.
 func (c *Client) Store() *store.Store { return c.store }
+
+// PairCode links this device by phone number instead of QR: it connects,
+// asks WhatsApp for an 8-character linking code and calls show with it.
+// The user types the code on their phone under Linked devices > Link a
+// device > Link with phone number instead. Blocks until pairing succeeds,
+// fails, or ctx is done. phone is the account's number in international
+// format, digits only (e.g. 972501234567).
+func (c *Client) PairCode(ctx context.Context, phone string, show func(code string)) error {
+	if c.wa.Store.ID != nil {
+		return errors.New("already paired; delete the store's whatsapp.db first to re-pair")
+	}
+	qrChan, err := c.wa.GetQRChannel(ctx)
+	if err != nil {
+		return fmt.Errorf("get QR channel: %w", err)
+	}
+	if err := c.wa.ConnectContext(ctx); err != nil {
+		return fmt.Errorf("connect: %w", err)
+	}
+	asked := false
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case evt, ok := <-qrChan:
+			if !ok {
+				return errors.New("pairing channel closed before pairing completed")
+			}
+			switch evt.Event {
+			case "code":
+				// The first QR event means the login socket is ready; request the
+				// phone code once and ignore later QR rotations.
+				if !asked {
+					asked = true
+					code, err := c.wa.PairPhone(ctx, phone, true, whatsmeow.PairClientChrome, "Chrome (Linux)")
+					if err != nil {
+						return fmt.Errorf("request pairing code: %w", err)
+					}
+					show(code)
+				}
+			case "success":
+				time.Sleep(500 * time.Millisecond)
+				return nil
+			case "timeout":
+				return errors.New("pairing timed out; run the command again")
+			default:
+				if evt.Event != "" {
+					c.log.Warnf("pairing event: %s", evt.Event)
+				}
+			}
+		}
+	}
+}

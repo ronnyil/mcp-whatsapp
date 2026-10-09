@@ -1,0 +1,32 @@
+{
+  "account_label": "Personal",
+  "tools": [
+    "list_chats",
+    "list_messages",
+    "get_chat",
+    "get_message_context",
+    "search_contacts",
+    "list_groups",
+    "get_group_info",
+    "get_poll_results",
+    "request_sync",
+    "get_status",
+    "send_message"
+  ],
+  "recipients": [
+    { "name": "Me (notes to self)", "id": "9725XXXXXXXX" },
+    { "name": "Spouse", "id": "9725YYYYYYYY" },
+    { "name": "Family group", "id": "120363000000000000@g.us" }
+  ],
+  "approval": {
+    "listen": "127.0.0.1:9765",
+    "public_url": "https://approve-personal.example.com",
+    "ttl_minutes": 30
+  },
+  "access": {
+    "team_domain": "yourteam.cloudflareaccess.com",
+    "allowed_emails": ["you@example.com"],
+    "approve_aud": "PASTE-AUD-TAG-OF-THE-APPROVALS-ACCESS-APP",
+    "mcp_aud": ""
+  }
+}

@@ -32,9 +32,15 @@ type sendMessageArgs struct {
 	MarkChatRead bool   `json:"mark_chat_read,omitempty"`
 }
 
+const approvalSendDesc = "Request that a WhatsApp text message be sent from this account. Nothing is sent by this call: the recipient must be on the server-side allowlist, and the call returns a one-time approval link the user must open and approve. Always show the link to the user. Returns plain text with the link, or an error if the recipient is not allowed."
+
 func (s *Server) registerSendMessage() {
+	desc := "Send a new WhatsApp text message to a person or group; recipients see it as a fresh message from the paired account and the row is also stored in the local cache. Reversible via delete_message (revoke) or edit_message (correct text); to quote a previous message use send_reply, for emoji acknowledgement use send_reaction. Returns a JSON object `{Success, Message, ID}` where `ID` is the WhatsApp message ID on success."
+	if s.approver != nil {
+		desc = approvalSendDesc
+	}
 	tool := mcp.NewTool("send_message",
-		mcp.WithDescription("Send a new WhatsApp text message to a person or group; recipients see it as a fresh message from the paired account and the row is also stored in the local cache. Reversible via delete_message (revoke) or edit_message (correct text); to quote a previous message use send_reply, for emoji acknowledgement use send_reaction. Returns a JSON object `{Success, Message, ID}` where `ID` is the WhatsApp message ID on success."),
+		mcp.WithDescription(desc),
 		mcp.WithString("recipient", mcp.Required(), mcp.Description(recipientDesc)),
 		mcp.WithString("message", mcp.Required(), mcp.Description("message body text")),
 		mcp.WithBoolean("mark_chat_read", mcp.DefaultBool(false), mcp.Description("if true, also ack recent incoming messages in the chat to clear the unread badge (defaults to false)")),
@@ -46,6 +52,15 @@ func (s *Server) registerSendMessage() {
 	s.mcp.AddTool(tool, mcp.NewTypedToolHandler(func(ctx context.Context, req mcp.CallToolRequest, a sendMessageArgs) (*mcp.CallToolResult, error) {
 		if a.Recipient == "" {
 			return mcp.NewToolResultError("recipient must be provided"), nil
+		}
+		if s.approver != nil {
+			// Restricted build: never send from the MCP path. File a pending
+			// request; a human approves it on the approval page.
+			msg, err := s.approver.Request(ctx, a.Recipient, a.Message)
+			if err != nil {
+				return mcp.NewToolResultError("not sent: " + err.Error()), nil
+			}
+			return mcp.NewToolResultText(msg), nil
 		}
 		ctx = withRateLimitOverride(ctx, req)
 		r := s.client.Send(ctx, a.Recipient, a.Message)

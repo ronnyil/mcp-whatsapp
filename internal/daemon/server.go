@@ -42,6 +42,17 @@ type Config struct {
 	Driver    pairDriver
 	MCPMount  func(mux *http.ServeMux)
 	AuthToken string
+
+	// AdminAddr, when set, moves /pair, /pair/* and /healthz to a second
+	// listener on this (loopback) address. The main listener then serves
+	// /mcp only, so the public tunnel hostname cannot reach pairing or reset.
+	AdminAddr string
+	// MCPWrap, if non-nil, wraps the main listener's handler (used for the
+	// optional Cloudflare Access JWT check on /mcp).
+	MCPWrap func(http.Handler) http.Handler
+	// Healthy reports whether WhatsApp is connected; served at /healthz on
+	// the admin listener.
+	Healthy func() bool
 }
 
 // Server is the long-lived daemon process. Safe for a single Run call.
@@ -95,7 +106,26 @@ func (s *Server) BoundAddr() string {
 func (s *Server) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	handlers := newPairHandlers(s.cache, s.cfg.Driver)
-	handlers.mount(mux)
+	if s.cfg.AdminAddr != "" {
+		adminMux := http.NewServeMux()
+		handlers.mount(adminMux)
+		adminMux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+			if s.cfg.Healthy != nil && s.cfg.Healthy() {
+				_, _ = w.Write([]byte("ok\n"))
+				return
+			}
+			http.Error(w, "disconnected", http.StatusServiceUnavailable)
+		})
+		adminLn, err := net.Listen("tcp", s.cfg.AdminAddr)
+		if err != nil {
+			return fmt.Errorf("admin listen: %w", err)
+		}
+		adminSrv := &http.Server{Handler: adminMux, ReadHeaderTimeout: 5 * time.Second}
+		go func() { _ = adminSrv.Serve(adminLn) }()
+		defer adminSrv.Close()
+	} else {
+		handlers.mount(mux)
+	}
 	if s.cfg.MCPMount != nil {
 		s.cfg.MCPMount(mux)
 	} else {
@@ -106,6 +136,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 
 	rootHandler := authMiddleware(mux, s.cfg.AuthToken)
+	if s.cfg.MCPWrap != nil {
+		rootHandler = s.cfg.MCPWrap(rootHandler)
+	}
 
 	ln, err := net.Listen("tcp", s.cfg.Addr)
 	if err != nil {

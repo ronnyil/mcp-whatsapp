@@ -25,6 +25,7 @@ Usage:
 
 Commands:
   login   Pair this device with your WhatsApp account via QR code (terminal)
+  pair-code PHONE  Pair by phone number + 8-character code (no QR, works on one phone)
   serve   Run the always-on HTTP MCP daemon (tracks events + serves MCP on 127.0.0.1:8765)
   smoke   Non-interactive boot check (CI): opens store + builds MCP server without connecting
   help    Show this help
@@ -83,6 +84,8 @@ func main() {
 	switch cmd {
 	case "login":
 		code = runLogin(storeDir, redactor, rest)
+	case "pair-code":
+		code = runPairCode(storeDir, redactor, rest)
 	case "serve":
 		code = runServe(storeDir, redactor, rest)
 	case "smoke":

@@ -11,10 +11,14 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
+	"github.com/sealjay/mcp-whatsapp/internal/accessjwt"
+	"github.com/sealjay/mcp-whatsapp/internal/approval"
 	"github.com/sealjay/mcp-whatsapp/internal/client"
 	"github.com/sealjay/mcp-whatsapp/internal/daemon"
 	mcpsrv "github.com/sealjay/mcp-whatsapp/internal/mcp"
+	"github.com/sealjay/mcp-whatsapp/internal/policy"
 	"github.com/sealjay/mcp-whatsapp/internal/security"
 	"github.com/sealjay/mcp-whatsapp/internal/store"
 )
@@ -23,12 +27,29 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	var (
 		addr        string
 		allowRemote bool
+		policyPath  string
+		adminAddr   string
 	)
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(os.Stderr)
 	fs.StringVar(&addr, "addr", "", "HTTP bind address (default: 127.0.0.1:8765, env WHATSAPP_MCP_ADDR)")
 	fs.BoolVar(&allowRemote, "allow-remote", false, "allow binding to a non-loopback address")
+	fs.StringVar(&policyPath, "policy", "", "policy JSON file (required): tool allowlist, send recipients, approval and Access settings")
+	fs.StringVar(&adminAddr, "admin-addr", "127.0.0.1:8865", "loopback address for /pair and /healthz (never expose this)")
 	if err := fs.Parse(args); err != nil {
+		return 2
+	}
+	if policyPath == "" {
+		fmt.Fprintln(os.Stderr, "-policy is required in this build")
+		return 2
+	}
+	pol, err := policy.Load(policyPath)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		return 2
+	}
+	if !isLoopbackAddr(adminAddr) {
+		fmt.Fprintln(os.Stderr, "-admin-addr must be a loopback address")
 		return 2
 	}
 
@@ -41,9 +62,10 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	// When binding to a non-loopback address we require a shared bearer
 	// token. Loopback-only operation intentionally keeps no token so local
 	// editors and curl can hit the daemon without extra setup.
-	var authToken string
+	// This fork honours WHATSAPP_MCP_TOKEN on loopback too, so a bearer
+	// token can be enforced behind a tunnel.
+	authToken := os.Getenv("WHATSAPP_MCP_TOKEN")
 	if allowRemote {
-		authToken = os.Getenv("WHATSAPP_MCP_TOKEN")
 		if authToken == "" {
 			fmt.Fprintln(os.Stderr, "-allow-remote requires WHATSAPP_MCP_TOKEN to be set in the environment")
 			return 2
@@ -101,22 +123,55 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 	// The daemon owns the pair cache, so build it first, then hand the cache
 	// to the MCP server (so pairing_status can surface the live QR), then
 	// mount the MCP HTTP handler back onto the daemon.
+	var mcpWrap func(http.Handler) http.Handler
+	if pol.Access.MCPAUD != "" {
+		v := accessjwt.New(ctx, pol.Access.TeamDomain, pol.Access.MCPAUD, pol.Access.AllowedEmails)
+		mcpWrap = func(h http.Handler) http.Handler { return accessjwt.Middleware(v, h) }
+	}
+
 	d, err := daemon.New(daemon.Config{
 		Addr:      addr,
 		Driver:    drv,
 		AuthToken: authToken,
+		AdminAddr: adminAddr,
+		MCPWrap:   mcpWrap,
+		Healthy:   c.IsConnected,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "daemon.New: %v\n", err)
 		return 1
 	}
 
-	mcpServer := mcpsrv.NewServer(c, d.Cache())
+	var approver mcpsrv.Approver
+	if pol.ToolAllowed("send_message") {
+		v := accessjwt.New(ctx, pol.Access.TeamDomain, pol.Access.ApproveAUD, pol.Access.AllowedEmails)
+		mgr, err := approval.Open(storeDir, pol, c, v)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "approvals: %v\n", err)
+			return 1
+		}
+		if !isLoopbackAddr(pol.Approval.Listen) {
+			fmt.Fprintln(os.Stderr, "approval.listen must be a loopback address")
+			return 2
+		}
+		approvalSrv := &http.Server{Addr: pol.Approval.Listen, Handler: mgr.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			if err := approvalSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				fmt.Fprintf(os.Stderr, "approval listener: %v\n", err)
+				cancel()
+			}
+		}()
+		defer approvalSrv.Close()
+		approver = mgr
+		fmt.Fprintf(os.Stderr, "approvals on http://%s (public %s)\n", pol.Approval.Listen, pol.Approval.PublicURL)
+	}
+
+	mcpServer := mcpsrv.NewRestrictedServer(c, d.Cache(), pol, approver)
 	d.SetMCPMount(mcpServer.AttachHTTP)
 
-	fmt.Fprintf(os.Stderr, "whatsapp-mcp listening on http://%s (MCP at /mcp, pairing at /pair)\n", addr)
+	fmt.Fprintf(os.Stderr, "whatsapp-mcp (%s) MCP on http://%s/mcp, admin on http://%s\n", pol.AccountLabel, addr, adminAddr)
 	if !c.IsLoggedIn() {
-		fmt.Fprintf(os.Stderr, "unpaired: open http://%s/pair to scan QR\n", addr)
+		fmt.Fprintln(os.Stderr, "unpaired: stop this service and run 'whatsapp-mcp pair-code <phone>'")
 	}
 	if err := d.Run(ctx); err != nil && !errors.Is(err, http.ErrServerClosed) {
 		fmt.Fprintf(os.Stderr, "daemon: %v\n", err)
