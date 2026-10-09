@@ -177,6 +177,13 @@ func runServe(storeDir string, redactor *security.Redactor, args []string) int {
 		fmt.Fprintf(os.Stderr, "approvals on http://%s (public %s)\n", pol.Approval.Listen, pol.Approval.PublicURL)
 	}
 
+	if mgr, ok := approver.(*approval.Manager); ok && pol.AutoSendToSelf {
+		if tok := os.Getenv("WHATSAPP_SELF_NOTE_TOKEN"); tok != "" {
+			d.SetSelfNote(mgr.SendToSelf, tok)
+			fmt.Fprintf(os.Stderr, "self-note endpoint on http://%s/self-note\n", adminAddr)
+		}
+	}
+
 	mcpServer := mcpsrv.NewRestrictedServer(c, d.Cache(), pol, approver)
 	d.SetMCPMount(mcpServer.AttachHTTP)
 

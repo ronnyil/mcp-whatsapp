@@ -413,6 +413,26 @@ func (m *Manager) record(id string, sr client.SendResult) string {
 	}
 }
 
+// SendToSelf delivers a note to the paired account's own chat, under the
+// same rules as an MCP self-send: only when auto_send_to_self is on, capped
+// per hour, recorded, never retried. Used by the local /self-note endpoint.
+func (m *Manager) SendToSelf(body string) (string, error) {
+	if !m.pol.AutoSendToSelf {
+		return "", fmt.Errorf("auto_send_to_self is off")
+	}
+	if strings.TrimSpace(body) == "" {
+		return "", fmt.Errorf("message must not be empty")
+	}
+	if len([]rune(body)) > maxBody {
+		return "", fmt.Errorf("message longer than %d characters", maxBody)
+	}
+	own := m.send.OwnJID()
+	if own.IsEmpty() {
+		return "", fmt.Errorf("not paired")
+	}
+	return m.sendToSelf(own, body)
+}
+
 // sendToSelf delivers a note to the account's own chat without approval
 // (auto_send_to_self). It is capped per hour and recorded like any request.
 func (m *Manager) sendToSelf(own types.JID, body string) (string, error) {

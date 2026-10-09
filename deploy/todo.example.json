@@ -6,6 +6,8 @@
   ],
   "state": "/var/lib/wa-todo/state.db",
   "mail_env": "/etc/whatsapp-mcp/mail.env",
+  "deliver": "whatsapp",
+  "whatsapp_account": "personal",
   "send_empty": true,
   "lookback_days": 14
 }

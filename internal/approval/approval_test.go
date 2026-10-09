@@ -597,3 +597,24 @@ func TestSelfSendAmbiguousFailureNotRetried(t *testing.T) {
 		t.Fatalf("attempts=%d", e.sender.count())
 	}
 }
+
+func TestExportedSendToSelf(t *testing.T) {
+	e := newEnv(t)
+	if _, err := e.m.SendToSelf("x"); err == nil {
+		t.Fatal("SendToSelf worked with auto_send_to_self off")
+	}
+	e.open(writePolicyOpts(t, e.dir, "", true))
+	if msg, err := e.m.SendToSelf("digest"); err != nil || !strings.HasPrefix(msg, "SENT") {
+		t.Fatalf("msg=%q err=%v", msg, err)
+	}
+	if e.sender.count() != 1 || e.sender.calls[0] != (sent{ownJID, "digest"}) {
+		t.Fatalf("calls %+v", e.sender.calls)
+	}
+	if _, err := e.m.SendToSelf(strings.Repeat("x", maxBody+1)); err == nil {
+		t.Fatal("over-long note accepted")
+	}
+	e.sender.own = types.JID{}
+	if _, err := e.m.SendToSelf("x"); err == nil {
+		t.Fatal("unpaired SendToSelf worked")
+	}
+}

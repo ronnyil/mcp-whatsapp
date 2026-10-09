@@ -124,6 +124,8 @@ for a in "${ACCOUNTS[@]}"; do
   envf=/etc/whatsapp-mcp/$a.env
   [ -f "$envf" ] || printf 'MCP_ADDR=127.0.0.1:%d\nADMIN_ADDR=127.0.0.1:%d\nWHATSAPP_MCP_MEDIA_ROOT=/var/lib/wa-%s/uploads\n' \
     $((8765 + i)) $((8865 + i)) "$a" > "$envf"
+  # Secret for the loopback /self-note endpoint (digest to "Message yourself").
+  grep -q '^WHATSAPP_SELF_NOTE_TOKEN=' "$envf" || echo "WHATSAPP_SELF_NOTE_TOKEN=$(openssl rand -hex 32)" >> "$envf"
   pol=/etc/whatsapp-mcp/$a.json
   [ -f "$pol" ] || sed -e "s/127.0.0.1:9765/127.0.0.1:$((9765 + i))/" \
                        -e "s/approve-personal/approve-$a/" \

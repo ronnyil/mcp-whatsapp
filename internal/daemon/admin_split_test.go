@@ -2,8 +2,10 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -139,5 +141,74 @@ func TestRestricted_AdminPortInUseFailsStartup(t *testing.T) {
 	s, _ := New(Config{Addr: "127.0.0.1:0", AdminAddr: first.AdminBoundAddr(), Driver: newFakePairDriver(true)})
 	if err := s.Run(context.Background()); err == nil {
 		t.Fatal("Run succeeded with admin port taken")
+	}
+}
+
+func postNote(t *testing.T, url, auth, body string) int {
+	t.Helper()
+	req, _ := http.NewRequest(http.MethodPost, url, strings.NewReader(body))
+	if auth != "" {
+		req.Header.Set("Authorization", auth)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	return resp.StatusCode
+}
+
+func TestSelfNoteEndpoint(t *testing.T) {
+	var got []string
+	fail := false
+	s, err := New(Config{
+		Addr: "127.0.0.1:0", AdminAddr: "127.0.0.1:0", NoAutoPair: true,
+		Driver: newFakePairDriver(true), Healthy: func() bool { return true },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.SetSelfNote(func(b string) (string, error) {
+		if fail {
+			return "", errors.New("cap reached")
+		}
+		got = append(got, b)
+		return "SENT", nil
+	}, "s3cret")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = s.Run(ctx) }()
+	<-s.listenerOK
+	adm := "http://" + s.AdminBoundAddr() + "/self-note"
+	pub := "http://" + s.BoundAddr() + "/self-note"
+
+	for name, auth := range map[string]string{"none": "", "wrong": "Bearer nope", "no scheme": "s3cret"} {
+		if c := postNote(t, adm, auth, "x"); c != http.StatusUnauthorized {
+			t.Errorf("%s token: %d", name, c)
+		}
+	}
+	if c := postNote(t, pub, "Bearer s3cret", "x"); c != http.StatusNotFound {
+		t.Errorf("self-note reachable on public listener: %d", c)
+	}
+	if c := do(t, http.MethodGet, adm); c != http.StatusMethodNotAllowed {
+		t.Errorf("GET: %d", c)
+	}
+	if len(got) != 0 {
+		t.Fatalf("sent without valid token: %v", got)
+	}
+	if c := postNote(t, adm, "Bearer s3cret", "digest text"); c != http.StatusOK || len(got) != 1 || got[0] != "digest text" {
+		t.Fatalf("valid post: %d %v", c, got)
+	}
+	fail = true
+	if c := postNote(t, adm, "Bearer s3cret", "x"); c != http.StatusBadGateway {
+		t.Fatalf("send error should be 502, got %d", c)
+	}
+}
+
+func TestSelfNoteAbsentWithoutToken(t *testing.T) {
+	s := startRestricted(t, newFakePairDriver(true), func() bool { return true }, nil)
+	if c := postNote(t, "http://"+s.AdminBoundAddr()+"/self-note", "Bearer x", "x"); c != http.StatusNotFound {
+		t.Fatalf("self-note exists when not configured: %d", c)
 	}
 }

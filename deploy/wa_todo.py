@@ -35,8 +35,12 @@ fails after the server accepted the message but before we saw the reply, the
 next digest repeats those changes: delivery is at-least-once, duplicates are
 possible, loss is not.
 
+Delivery: "deliver": "whatsapp" sends the digest to your own "Message
+yourself" chat through the account's loopback /self-note endpoint (needs
+auto_send_to_self and WHATSAPP_SELF_NOTE_TOKEN); "email" (default) uses SMTP.
+
 Config: /etc/whatsapp-mcp/todo.json (override with WA_TODO_CONFIG).
-Secrets: /etc/whatsapp-mcp/mail.env.
+Secrets: /etc/whatsapp-mcp/mail.env (ANTHROPIC_API_KEY, SMTP_* for e-mail).
 """
 import contextlib
 import fcntl
@@ -295,6 +299,63 @@ def smtp_send(env, subject, body, on_accepted):
             s.quit()
 
 
+WA_PART_LIMIT = 3500  # characters per WhatsApp note; the server accepts up to 4096
+
+
+def split_message(text, limit=WA_PART_LIMIT):
+    """Split on line boundaries into parts of at most limit characters."""
+    parts, cur = [], ""
+    for line in text.splitlines(keepends=True):
+        while len(line) > limit:  # a single over-long line
+            if cur:
+                parts.append(cur)
+                cur = ""
+            parts.append(line[:limit])
+            line = line[limit:]
+        if len(cur) + len(line) > limit:
+            parts.append(cur)
+            cur = ""
+        cur += line
+    if cur.strip():
+        parts.append(cur)
+    return [p.rstrip("\n") for p in parts] or [""]
+
+
+def whatsapp_send(admin_addr, token, subject, body, on_accepted, timeout=60):
+    """Deliver to your own "Message yourself" chat through the account's
+    loopback /self-note endpoint. on_accepted runs only after every part was
+    sent. If a later part fails, the next run resends the whole digest, so a
+    part can arrive twice; nothing is lost."""
+    parts = split_message("%s\n\n%s" % (subject, body))
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    for i, part in enumerate(parts, 1):
+        text = ("(%d/%d) " % (i, len(parts)) if len(parts) > 1 else "") + part
+        req = urllib.request.Request("http://%s/self-note" % admin_addr, data=text.encode(), method="POST",
+                                     headers={"Authorization": "Bearer " + token,
+                                              "Content-Type": "text/plain; charset=utf-8"})
+        with opener.open(req, timeout=timeout) as resp:
+            if resp.status != 200:
+                raise RuntimeError("self-note returned %d" % resp.status)
+    on_accepted()
+
+
+def make_sender(cfg, env, conf_dir="/etc/whatsapp-mcp"):
+    """Returns (send, problem). send is None when delivery isn't configured."""
+    if cfg.get("deliver", "email") == "whatsapp":
+        acct = cfg.get("whatsapp_account", "personal")
+        try:
+            acct_env = load_env(os.path.join(conf_dir, acct + ".env"))
+        except FileNotFoundError:
+            return None, "no %s.env" % acct
+        addr, token = acct_env.get("ADMIN_ADDR"), acct_env.get("WHATSAPP_SELF_NOTE_TOKEN")
+        if not addr or not token:
+            return None, "%s.env has no ADMIN_ADDR or WHATSAPP_SELF_NOTE_TOKEN" % acct
+        return (lambda subj, body, ok: whatsapp_send(addr, token, subj, body, ok)), None
+    if not mail_configured(env):
+        return None, "mail.env not configured"
+    return (lambda subj, body, ok: smtp_send(env, subj, body, ok)), None
+
+
 def deliver(state, send, now, send_empty=True):
     seqs, subject, body = build_digest(state, now)
     if not seqs and not send_empty:
@@ -344,8 +405,9 @@ def main():
     with open(CONFIG) as f:
         cfg = json.load(f)
     env = load_env(cfg.get("mail_env", "/etc/whatsapp-mcp/mail.env"))
-    if not mail_configured(env) or env.get("ANTHROPIC_API_KEY", "") in PLACEHOLDERS:
-        print("wa_todo: mail.env not configured yet; skipping", file=sys.stderr)
+    send, problem = make_sender(cfg, env, cfg.get("conf_dir", "/etc/whatsapp-mcp"))
+    if send is None or env.get("ANTHROPIC_API_KEY", "") in PLACEHOLDERS:
+        print("wa_todo: not configured yet (%s); skipping" % (problem or "ANTHROPIC_API_KEY missing"), file=sys.stderr)
         return 0
     state_path = cfg.get("state", "/var/lib/wa-todo/state.db")
     with open(state_path + ".lock", "w") as lock:
@@ -354,8 +416,7 @@ def main():
         except BlockingIOError:
             print("wa_todo: another run is in progress", file=sys.stderr)
             return 0
-        return run(cfg, env, lambda p: ask_claude(env, p),
-                   lambda subj, body, ok: smtp_send(env, subj, body, ok))
+        return run(cfg, env, lambda p: ask_claude(env, p), send)
 
 
 if __name__ == "__main__":

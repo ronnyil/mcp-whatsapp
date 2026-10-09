@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strings"
@@ -59,6 +60,11 @@ type Config struct {
 	// Healthy reports whether WhatsApp is connected; served at /healthz on
 	// the admin listener.
 	Healthy func() bool
+	// SelfNote, with SelfNoteToken, adds POST /self-note to the admin
+	// listener: the request body is sent to the account's own chat. The
+	// bearer token keeps other local users and processes out.
+	SelfNote      func(body string) (string, error)
+	SelfNoteToken string
 }
 
 // Server is the long-lived daemon process. Safe for a single Run call.
@@ -99,6 +105,11 @@ func (s *Server) Cache() *PairCache { return s.cache }
 // so setting it any time before Run takes effect.
 func (s *Server) SetMCPMount(fn func(mux *http.ServeMux)) { s.cfg.MCPMount = fn }
 
+// SetSelfNote installs the /self-note handler before Run (see Config).
+func (s *Server) SetSelfNote(fn func(string) (string, error), token string) {
+	s.cfg.SelfNote, s.cfg.SelfNoteToken = fn, token
+}
+
 // AdminBoundAddr returns the admin listener's address (tests).
 func (s *Server) AdminBoundAddr() string {
 	s.mu.Lock()
@@ -129,6 +140,26 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 			http.Error(w, "disconnected", http.StatusServiceUnavailable)
 		})
+		if s.cfg.SelfNote != nil && s.cfg.SelfNoteToken != "" {
+			want := []byte("Bearer " + s.cfg.SelfNoteToken)
+			adminMux.HandleFunc("POST /self-note", func(w http.ResponseWriter, r *http.Request) {
+				if subtle.ConstantTimeCompare([]byte(r.Header.Get("Authorization")), want) != 1 {
+					http.Error(w, "unauthorized", http.StatusUnauthorized)
+					return
+				}
+				body, err := io.ReadAll(io.LimitReader(r.Body, 64<<10))
+				if err != nil {
+					http.Error(w, "bad request", http.StatusBadRequest)
+					return
+				}
+				msg, err := s.cfg.SelfNote(string(body))
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadGateway)
+					return
+				}
+				_, _ = w.Write([]byte(msg + "\n"))
+			})
+		}
 		adminLn, err := net.Listen("tcp", s.cfg.AdminAddr)
 		if err != nil {
 			return fmt.Errorf("admin listen: %w", err)
