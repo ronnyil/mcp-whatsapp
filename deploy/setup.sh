@@ -13,6 +13,7 @@ shift
 ACCOUNTS=("$@")
 [ ${#ACCOUNTS[@]} -gt 0 ] || ACCOUNTS=(personal)
 GO_VERSION=1.26.0
+BRANCH="${BRANCH:-personal-hardening}"
 SRC=/opt/mcp-whatsapp
 
 echo "== packages"
@@ -43,7 +44,7 @@ if ! command -v cloudflared >/dev/null; then
 fi
 
 echo "== build"
-if [ -d "$SRC/.git" ]; then git -C "$SRC" pull --ff-only; else git clone "$REPO" "$SRC"; fi
+if [ -d "$SRC/.git" ]; then git -C "$SRC" pull --ff-only; else git clone -b "$BRANCH" "$REPO" "$SRC"; fi
 cd "$SRC"
 go mod tidy
 go vet ./...
